@@ -1,61 +1,89 @@
-# CUMENE_Process_Simulation
-
-Aspen Plus 모사 결과를 기반으로 재순환 공정을 설계하고,  
-Python으로 최적 재순환 비율 탐색 및 공정 조건을 분석한 프로젝트입니다.
-
----
-
 ## 배경 및 문제 정의
 
-기존 CUMENE 생산 공정에서 단순 촉매 교체 시 단기 생산성은 향상되지만,  
-반응기 부하 증가로 장기적인 안정성과 경제성이 저하되는 문제가 있었습니다.
-
-Aspen Plus로 기존 공정 P&ID를 모사한 결과:
-
-| 항목 | 기존 공정 | 개선 목표 |
-|------|-----------|-----------|
-| 반응기 전환율 | 61.56% | 70% 이상 |
-| 미반응 원료 배출 | 약 10~15% | 최소화 |
-| 개선 방향 | 촉매 교체 | **재순환 공정 설계** |
+기존 공정에서 단순 촉매 교체 시 단기 생산성은 향상되지만, 반응기 부하 증가로 장기적인 안정성과 경제성이 저하되는 문제가 있었습니다.  
+Aspen Plus로 기존 공정을 모사한 결과, 이론적으로 70% 이상 달성 가능한 전환율이 실제로는 61.56%에 머물렀고 미반응 원료가 약 10~15% 배출되고 있음을 확인했습니다.  
+단순 촉매 교체 대신 **미반응 원료를 반응기로 재투입하는 재순환 공정**을 설계했습니다.
 
 ---
 
-## 개선 접근법
+## Aspen Plus 실측 수치
 
-미반응 원료를 다시 반응기로 재투입하는 **재순환(Recycle) 공정**을 설계했습니다.  
-단, 재순환 비율이 과도하면 반응기 부하가 급증하여 오히려 경제성이 저하됩니다.  
-수십 회의 반복 시뮬레이션을 통해 최적 재순환 비율을 정량적으로 탐색했습니다.
+### Stage 1 — 기존 공정
+
+| Stream | Cumene (kmol/hr) | Benzene (kmol/hr) | Propylene (kmol/hr) |
+|--------|-----------------|-------------------|---------------------|
+| CUMENE | 92.1131 | 0.0469874 | 0 |
+| FT-VAP | 0.632861 | 6.8541 | 5.69219 |
+| B2 | 0.00181414 | 2.05536e-13 | 0 |
+
+CUMENE Stream 상태: **Liquid, 151.807°C, 1 bar**
+
+전환율 계산:
+
+$$X_i = \frac{(B_{feed} - B_{out}) + (P_{feed} - P_{out})}{B_{feed} + P_{feed}} = \frac{(205.75 - 111.159) + (104.5 - 8.09456)}{205.75 + 104.5} \approx 61.56\%$$
+
+### Stage 2 — 재순환 공정
+
+| Stream | Cumene (kmol/hr) | Benzene (kmol/hr) | Propylene (kmol/hr) |
+|--------|-----------------|-------------------|---------------------|
+| CUMENE | 93.9971 | 0.0480637 | 0 |
+| FT-VAP | 0.754708 | 7.31583 | 5.58192 |
+| B2 | 0.00208172 | 2.37565e-13 | 0 |
+
+전환율:
+
+$$X_i = \frac{(199.324 - 102.487) + (106.543 - 7.62462)}{199.324 + 106.543} \approx 64.00\%$$
+
+### Stage 2 기술경제성 분석
+
+| 항목 | 값 |
+|------|----|
+| Total Capital Cost | USD 5,527,980 |
+| Total Operating Cost | USD 138,344,000 / year |
+| Payback Period | 9.34861 year |
+
+### 민감도 분석
+
+큐멘 생산량이 최대가 되는 최적 벤젠 공급량: **103.105 kmol/hr**
 
 ---
 
 ## 주요 기능
 
-### 1. 재순환 비율 최적화 (`optimize_recycle_ratio`)
-- 재순환 비율 0.00 ~ 0.70 구간을 71단계로 분할하여 전수 탐색
-- 각 단계마다 전환율, 미반응 원료, 반응기 부하, 경제성 점수 계산
-- 최적점 자동 출력 및 결과 CSV 저장
+### 1. 전환율 계산 (`calc_conversion`, `print_conversion_summary`)
+
+Aspen Plus 문제풀이 수식을 그대로 구현해 Stage 1, 2 전환율을 계산하고 경제성 수치를 함께 출력합니다.
+
+### 2. 재순환 비율 최적화 (`optimize_recycle_ratio`)
+
+재순환 비율 0.00~0.90 구간을 91단계로 분할해 전환율, 큐멘 생산량, 반응기 부하, 경제성 점수를 계산합니다.  
+Stage 1(r=0, 61.56%)과 Stage 2(r≈0.10, 64.00%) 실측값을 보간 기준으로 사용합니다.
 
 ```python
-df_opt = optimize_recycle_ratio(T_in=420, P_in=30, steps=71)
+df_opt = optimize_recycle_ratio(steps=91)
 # → recycle_optimization_results.csv 저장
 ```
 
-### 2. 공정 조건 시간 축 추적 (`track_process_conditions`)
-- 온도(°C), 압력(bar), 유량(kmol/h)을 시간 축으로 추적
-- 재순환 루프 안정화 효과 및 공정 변동 모사
-- 결과 DataFrame 반환 및 CSV 저장
+### 3. 공정 조건 시간 축 추적 (`track_process_conditions`)
+
+CUMENE Stream 기준(Liquid, 151.807°C, 1 bar)으로 온도·압력·유량을 시간 축으로 추적합니다.
 
 ```python
-df_process = track_process_conditions(
-    recycle_ratio=0.35, T_in=420, P_in=30, flow_in=100, duration_min=50
+df_proc = track_process_conditions(
+    T_in=151.807, P_in=1.0,
+    flow_in=93.9971, recycle_ratio=0.10, duration_min=50
 )
 # → process_conditions_log.csv 저장
 ```
 
-### 3. 결과 분석 및 시각화
-- `plot_recycle_optimization()` — 재순환 비율 vs 전환율·경제성·부하 곡선
-- `plot_process_conditions()` — 온도·압력·유량 시간 추적 라인 차트 (3단 subplot)
-- `plot_comparison()` — 기존 vs 개선 공정 4개 지표 비교 바 차트
+### 4. 민감도 분석 (`sensitivity_benzene_feed`)
+
+벤젠 공급량 변화에 따른 큐멘 생산량 변화를 분석합니다. 최적점 103.105 kmol/hr를 기준으로 좌우 수확 체감 특성을 반영합니다.
+
+```python
+df_sens = sensitivity_benzene_feed(feed_range=(80.0, 130.0), steps=51)
+# → sensitivity_analysis.csv 저장
+```
 
 ---
 
@@ -73,12 +101,14 @@ pip install numpy pandas matplotlib
 python cumene_process_simulation.py
 ```
 
-실행 시 순서대로 3단계가 진행됩니다.
+실행 순서:
 
 ```
-[ 1단계 ] 재순환 비율 최적화 시뮬레이션
-[ 2단계 ] 공정 조건 시간 축 추적
-[ 3단계 ] 시각화 출력
+[ 1단계 ] 전환율 계산 및 경제성 요약
+[ 2단계 ] 재순환 비율 최적화 (91회 시뮬레이션)
+[ 3단계 ] 공정 조건 시간 축 추적 (Stage 2 기준)
+[ 4단계 ] 민감도 분석 (벤젠 공급량 vs 큐멘 생산량)
+[ 5단계 ] 시각화 출력
 ```
 
 ### 출력 파일
@@ -87,42 +117,23 @@ python cumene_process_simulation.py
 |--------|------|
 | `recycle_optimization_results.csv` | 재순환 비율별 전체 시뮬레이션 결과 |
 | `process_conditions_log.csv` | 시간 축 온도·압력·유량 로그 |
-| `recycle_optimization.png` | 재순환 비율 최적화 그래프 |
+| `sensitivity_analysis.csv` | 벤젠 공급량별 큐멘 생산량 분석 결과 |
+| `recycle_optimization.png` | 재순환 비율 최적화 곡선 (Stage 1·2 실측점 표시) |
 | `process_conditions.png` | 공정 조건 시간 추적 그래프 |
-| `process_comparison.png` | 기존 vs 개선 공정 비교 그래프 |
+| `stream_comparison.png` | Stage 1 vs 2 스트림 몰유량 비교 바 차트 |
+| `sensitivity_analysis.png` | 벤젠 공급량 vs 큐멘 생산량 민감도 곡선 |
 
 ---
 
 ## 주요 결과
 
-| 항목 | 기존 공정 | 개선 공정 | 변화 |
-|------|-----------|-----------|------|
-| 전환율 | 61.56% | 74.0% | **+12.4%p** |
-| 미반응 원료 | 13.5% | 3.2% | **−10.3%p** |
-| 경제성 점수 | 58/100 | 87/100 | **+29** |
-| 안정성 점수 | 72/100 | 91/100 | **+19** |
+| 항목 | Stage 1 (기존) | Stage 2 (재순환) | 변화 |
+|------|---------------|-----------------|------|
+| 전환율 | 61.56% | 64.00% | **+2.44%p** |
+| 큐멘 생산량 | 92.1131 kmol/hr | 93.9971 kmol/hr | **+1.884 kmol/hr** |
+| 미반응 벤젠 (FT-VAP) | 6.8541 kmol/hr | 7.31583 kmol/hr | 재순환 흐름 반영 |
 
-최적 재순환 비율: **0.35**  
-(재순환 비율 > 0.5 초과 시 반응기 부하 급증으로 경제성 역전 확인)
-
----
-
-## Aspen Plus 연동 방법
-
-현재 코드는 모사 데이터 기반으로 동작합니다.  
-실제 Aspen Plus와 연동하려면 `simulate_reactor()` 내부 계산 로직을 Aspen API 호출로 교체하세요.
-
-```python
-def simulate_reactor(recycle_ratio, T_in=420.0, P_in=30.0):
-    # 기존 모사 계산 → 아래 API 호출로 교체
-    result = aspen_api.run(recycle_ratio=recycle_ratio, T_in=T_in, P_in=P_in)
-    return {
-        "conversion": result.conversion,
-        "unreacted": result.unreacted_fraction,
-        "reactor_load": result.load,
-        "econ_score": result.economic_score,
-    }
-```
+재순환 비율이 0.45를 초과하면 반응기 부하가 급증해 경제성이 역전되는 것을 시뮬레이션으로 확인했습니다.
 
 ---
 
@@ -130,13 +141,15 @@ def simulate_reactor(recycle_ratio, T_in=420.0, P_in=30.0):
 
 ```
 .
-├── cumene_process_simulation.py   # 메인 시뮬레이션 코드
-├── README.md                      # 이 문서
+├── cumene_process_simulation.py     # 메인 시뮬레이션 코드
+├── README.md                        # 이 문서
 ├── recycle_optimization_results.csv
 ├── process_conditions_log.csv
+├── sensitivity_analysis.csv
 ├── recycle_optimization.png
 ├── process_conditions.png
-└── process_comparison.png
+├── stream_comparison.png
+└── sensitivity_analysis.png
 ```
 
 ---
