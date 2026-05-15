@@ -15,38 +15,38 @@ rcParams['axes.unicode_minus'] = False
 # Aspen Plus 실측 데이터
 # ─────────────────────────────────────────────
 
-# Stage 1: 기존 공정 스트림 몰유량 (kmol/hr)
+# 기존 공정 스트림 몰유량 (kmol/hr)
 STAGE1_STREAMS = {
     "CUMENE": {"Cumene": 92.1131,    "Benzene": 0.0469874,    "Propylene": 0.0},
     "FT-VAP": {"Cumene": 0.632861,   "Benzene": 6.8541,       "Propylene": 5.69219},
     "B2":     {"Cumene": 0.00181414, "Benzene": 2.05536e-13,  "Propylene": 0.0},
 }
 
-# Stage 1: CUMENE Stream 상태
+# CUMENE Stream 상태
 STAGE1_CUMENE_PHASE = "Liquid"
 STAGE1_CUMENE_TEMP  = 151.807  # °C
 STAGE1_CUMENE_PRES  = 1.0      # bar
 
-# Stage 1 전환율 계산 기준값 (kmol/hr)
+# 전환율 계산 기준값 (kmol/hr)
 STAGE1_BENZENE_FEED   = 205.75
 STAGE1_PROPYLENE_FEED = 104.5
 STAGE1_BENZENE_OUT    = 111.159
 STAGE1_PROPYLENE_OUT  = 8.09456
 
-# Stage 2: 재순환 공정 스트림 몰유량 (kmol/hr)
+# 재순환 공정 스트림 몰유량 (kmol/hr)
 STAGE2_STREAMS = {
     "CUMENE": {"Cumene": 93.9971,    "Benzene": 0.0480637,    "Propylene": 0.0},
     "FT-VAP": {"Cumene": 0.754708,   "Benzene": 7.31583,      "Propylene": 5.58192},
     "B2":     {"Cumene": 0.00208172, "Benzene": 2.37565e-13,  "Propylene": 0.0},
 }
 
-# Stage 2 전환율 계산 기준값 (kmol/hr)
+# 전환율 계산 기준값 (kmol/hr)
 STAGE2_BENZENE_FEED   = 199.324
 STAGE2_PROPYLENE_FEED = 106.543
 STAGE2_BENZENE_OUT    = 102.487
 STAGE2_PROPYLENE_OUT  = 7.62462
 
-# Stage 2 기술경제성 분석 결과
+# 기술경제성 분석 결과
 STAGE2_ECONOMICS = {
     "Total Capital Cost (USD)":      5_527_980,
     "Total Operating Cost (USD/yr)": 138_344_000,
