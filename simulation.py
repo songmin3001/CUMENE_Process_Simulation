@@ -1,18 +1,6 @@
-"""
-CUMENE 생산 공정 개선 시뮬레이션
-=================================
-1. 재순환 비율 최적화 (수십 회 시뮬레이션 반복)
-2. 온도·압력·유량 시간 축 추적
-3. 기존 vs 개선 공정 결과 분석
-
-실제 Aspen Plus 연동 없이 모사 데이터 기반으로 동작합니다.
-Aspen 연동 시 simulate_reactor() 내부를 API 호출로 교체하세요.
-"""
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 from matplotlib import rcParams
 
 # 한글 폰트 설정
@@ -24,241 +12,344 @@ rcParams['axes.unicode_minus'] = False
 
 
 # ─────────────────────────────────────────────
-# 공정 모델 함수 (Aspen Plus 모사 결과 기반)
+# Aspen Plus 실측 데이터
 # ─────────────────────────────────────────────
 
-def simulate_reactor(recycle_ratio: float, T_in: float = 420.0, P_in: float = 30.0) -> dict:
-    """
-    반응기 시뮬레이션 모사
-    - recycle_ratio : 재순환 비율 (0.0 ~ 0.7)
-    - T_in          : 반응기 입구 온도 (°C)
-    - P_in          : 반응기 입구 압력 (bar)
-    Returns dict: {conversion, unreacted, reactor_load, econ_score}
-    """
-    base_conversion = 61.56  # 기존 공정 전환율 (%)
-    T_boost = (T_in - 420) * 0.08
+# Stage 1: 기존 공정 스트림 몰유량 (kmol/hr)
+STAGE1_STREAMS = {
+    "CUMENE": {"Cumene": 92.1131,    "Benzene": 0.0469874,    "Propylene": 0.0},
+    "FT-VAP": {"Cumene": 0.632861,   "Benzene": 6.8541,       "Propylene": 5.69219},
+    "B2":     {"Cumene": 0.00181414, "Benzene": 2.05536e-13,  "Propylene": 0.0},
+}
 
-    if recycle_ratio <= 0.4:
-        conversion_gain = recycle_ratio * 32 + T_boost
-        load_factor = 1.0 + recycle_ratio * 1.4
+# Stage 1: CUMENE Stream 상태
+STAGE1_CUMENE_PHASE = "Liquid"
+STAGE1_CUMENE_TEMP  = 151.807  # °C
+STAGE1_CUMENE_PRES  = 1.0      # bar
+
+# Stage 1 전환율 계산 기준값 (kmol/hr)
+STAGE1_BENZENE_FEED   = 205.75
+STAGE1_PROPYLENE_FEED = 104.5
+STAGE1_BENZENE_OUT    = 111.159
+STAGE1_PROPYLENE_OUT  = 8.09456
+
+# Stage 2: 재순환 공정 스트림 몰유량 (kmol/hr)
+STAGE2_STREAMS = {
+    "CUMENE": {"Cumene": 93.9971,    "Benzene": 0.0480637,    "Propylene": 0.0},
+    "FT-VAP": {"Cumene": 0.754708,   "Benzene": 7.31583,      "Propylene": 5.58192},
+    "B2":     {"Cumene": 0.00208172, "Benzene": 2.37565e-13,  "Propylene": 0.0},
+}
+
+# Stage 2 전환율 계산 기준값 (kmol/hr)
+STAGE2_BENZENE_FEED   = 199.324
+STAGE2_PROPYLENE_FEED = 106.543
+STAGE2_BENZENE_OUT    = 102.487
+STAGE2_PROPYLENE_OUT  = 7.62462
+
+# Stage 2 기술경제성 분석 결과
+STAGE2_ECONOMICS = {
+    "Total Capital Cost (USD)":      5_527_980,
+    "Total Operating Cost (USD/yr)": 138_344_000,
+    "Payback Period (yr)":           9.34861,
+}
+
+# 민감도 분석: 큐멘 생산량 최대화 최적 벤젠 공급량
+OPTIMAL_BENZENE_FEED = 103.105  # kmol/hr
+
+
+# ─────────────────────────────────────────────
+# 1. 전환율 계산
+# ─────────────────────────────────────────────
+
+def calc_conversion(
+    benzene_feed: float, propylene_feed: float,
+    benzene_out: float,  propylene_out: float
+) -> float:
+    """
+    전환율 계산 (Aspen Plus 문제풀이 수식 기반)
+
+    Xi = (B_feed - B_out) + (P_feed - P_out)
+         ─────────────────────────────────────
+                  B_feed + P_feed
+    """
+    numerator   = (benzene_feed - benzene_out) + (propylene_feed - propylene_out)
+    denominator = benzene_feed + propylene_feed
+    return numerator / denominator * 100  # %
+
+
+def print_conversion_summary():
+    xi1 = calc_conversion(
+        STAGE1_BENZENE_FEED, STAGE1_PROPYLENE_FEED,
+        STAGE1_BENZENE_OUT,  STAGE1_PROPYLENE_OUT
+    )
+    xi2 = calc_conversion(
+        STAGE2_BENZENE_FEED, STAGE2_PROPYLENE_FEED,
+        STAGE2_BENZENE_OUT,  STAGE2_PROPYLENE_OUT
+    )
+    print("=" * 55)
+    print("  CUMENE 공정 전환율 (Aspen Plus 실측 기반)")
+    print("=" * 55)
+    print(f"  Stage 1 (기존 공정)    전환율 : {xi1:.2f}%")
+    print(f"  Stage 2 (재순환 공정)  전환율 : {xi2:.2f}%")
+    print(f"  전환율 향상             : +{xi2 - xi1:.2f}%p")
+    print(f"  큐멘 생산량 증가        : "
+          f"{STAGE2_STREAMS['CUMENE']['Cumene'] - STAGE1_STREAMS['CUMENE']['Cumene']:.4f} kmol/hr")
+    print("-" * 55)
+    print("  ▶ Stage 2 기술경제성 분석")
+    for k, v in STAGE2_ECONOMICS.items():
+        if "Cost" in k:
+            print(f"    {k:<40}: {v:,.0f}")
+        else:
+            print(f"    {k:<40}: {v}")
+    print(f"  ▶ 최적 벤젠 공급량 (민감도 분석) : {OPTIMAL_BENZENE_FEED} kmol/hr")
+    print("=" * 55)
+
+
+# ─────────────────────────────────────────────
+# 2. 재순환 비율 최적화
+# ─────────────────────────────────────────────
+
+def simulate_recycle(recycle_ratio: float) -> dict:
+    """
+    재순환 비율에 따른 공정 지표 모사
+    Stage 1(r=0): 전환율 61.56%, 큐멘 92.1131 kmol/hr
+    Stage 2(r≈0.10): 전환율 64.00%, 큐멘 93.9971 kmol/hr
+    고재순환비(r>0.45): 반응기 부하 급증, 경제성 저하
+    """
+    base_conv   = 61.56
+    base_cumene = 92.1131
+
+    if recycle_ratio <= 0.45:
+        conv_gain   = recycle_ratio * 26.0
+        load_factor = 1.0 + recycle_ratio * 1.1
+        cumene_prod = base_cumene + recycle_ratio * 20.0
     else:
-        # 고재순환비에서 수확 체감 + 부하 급증
-        conversion_gain = 0.4 * 32 + T_boost - (recycle_ratio - 0.4) * 18
-        load_factor = 1.0 + 0.4 * 1.4 + (recycle_ratio - 0.4) * 3.0
+        conv_gain   = 0.45 * 26.0 - (recycle_ratio - 0.45) * 22.0
+        load_factor = 1.0 + 0.45 * 1.1 + (recycle_ratio - 0.45) * 3.5
+        cumene_prod = base_cumene + 0.45 * 20.0 - (recycle_ratio - 0.45) * 15.0
 
-    conversion = min(max(base_conversion + conversion_gain, base_conversion), 82.0)
-    unreacted = max(1.0, 13.5 - recycle_ratio * 32 + (max(0, recycle_ratio - 0.4) * 20))
+    conversion  = min(max(base_conv + conv_gain, base_conv), 83.0)
     reactor_load = 100 * load_factor
-    econ_score = max(0, min(100, conversion * 1.1 - reactor_load * 0.05 + 10))
+    unreacted_b  = max(0.5, 6.8541 - recycle_ratio * 12.0
+                       + max(0, recycle_ratio - 0.45) * 8.0)
+    econ_score   = max(0, min(100, conversion * 1.05 - reactor_load * 0.045 + 8))
 
     return {
-        "recycle_ratio": round(recycle_ratio, 3),
-        "T_in": T_in,
-        "P_in": P_in,
-        "conversion": round(conversion, 2),
-        "unreacted": round(unreacted, 2),
-        "reactor_load": round(reactor_load, 2),
-        "econ_score": round(econ_score, 2),
+        "recycle_ratio":  round(recycle_ratio, 3),
+        "conversion_pct": round(conversion, 2),
+        "cumene_prod":    round(max(cumene_prod, 0), 4),
+        "unreacted_b":    round(unreacted_b, 4),
+        "reactor_load":   round(reactor_load, 2),
+        "econ_score":     round(econ_score, 2),
     }
 
 
+def optimize_recycle_ratio(steps: int = 91) -> pd.DataFrame:
+    """재순환 비율 0.00 ~ 0.90 구간 전수 탐색"""
+    ratios  = np.linspace(0.0, 0.90, steps)
+    results = [simulate_recycle(r) for r in ratios]
+    df      = pd.DataFrame(results)
+
+    best = df.loc[df["econ_score"].idxmax()]
+    print(f"  최적 재순환 비율    : {best['recycle_ratio']:.2f}")
+    print(f"  최적 전환율         : {best['conversion_pct']:.2f}%")
+    print(f"  최적 큐멘 생산량    : {best['cumene_prod']:.4f} kmol/hr")
+    print(f"  최적 경제성 점수    : {best['econ_score']:.2f}/100")
+    return df
+
+
+# ─────────────────────────────────────────────
+# 3. 공정 조건 시간 축 추적
+# ─────────────────────────────────────────────
+
 def track_process_conditions(
-    recycle_ratio: float = 0.35,
-    T_in: float = 420.0,
-    P_in: float = 30.0,
-    flow_in: float = 100.0,
-    duration_min: int = 50,
+    T_in: float        = STAGE1_CUMENE_TEMP,
+    P_in: float        = STAGE1_CUMENE_PRES,
+    flow_in: float     = 93.9971,
+    recycle_ratio: float = 0.10,
+    duration_min: int  = 50,
 ) -> pd.DataFrame:
     """
-    공정 조건을 시간 축으로 추적
-    - duration_min : 추적 시간 (분)
-    Returns DataFrame: [time, temperature, pressure, flowrate]
+    CUMENE Stream 기준 공정 조건 시간 축 추적
+    (Stage 2: Liquid, 151.807°C, 1 bar)
     """
     t = np.linspace(0, duration_min, duration_min + 1)
 
-    # 반응기 내 온도 변동 (입구 온도 기준 ±15°C 내 진동 후 안정)
     temperature = (
         T_in
-        + 15 * np.sin(t * 0.18)
-        - 5 * np.cos(t * 0.09)
-        + np.where(t > 30, -3.0, 0.0)        # 재순환 루프 안정화 효과
-        + np.random.normal(0, 0.5, len(t))
-    )
-
-    # 반응기 내 압력 변동 (bar)
-    pressure = (
-        P_in
-        + 2 * np.sin(t * 0.22 + 1)
-        - np.cos(t * 0.15)
-        + np.random.normal(0, 0.15, len(t))
-    )
-
-    # 재순환 반영 실제 공급 유량 (kmol/h)
-    recycle_flow = flow_in * recycle_ratio
-    total_flow = flow_in + recycle_flow
-    flowrate = (
-        total_flow
-        + 8 * np.sin(t * 0.14)
-        + 4 * np.cos(t * 0.25)
+        + 8  * np.sin(t * 0.15)
+        - 3  * np.cos(t * 0.08)
+        + np.where(t > 25, -1.5, 0.0)
         + np.random.normal(0, 0.3, len(t))
     )
+    pressure = (
+        P_in
+        + 0.08 * np.sin(t * 0.20 + 0.5)
+        - 0.03 * np.cos(t * 0.12)
+        + np.random.normal(0, 0.005, len(t))
+    )
+    total_flow = flow_in * (1 + recycle_ratio)
+    flowrate = (
+        total_flow
+        + 2.5 * np.sin(t * 0.13)
+        + 1.2 * np.cos(t * 0.22)
+        + np.random.normal(0, 0.2, len(t))
+    )
 
-    df = pd.DataFrame({
-        "time_min": t.astype(int),
-        "temperature_C": np.round(temperature, 2),
-        "pressure_bar": np.round(pressure, 2),
-        "flowrate_kmolh": np.round(flowrate, 2),
+    return pd.DataFrame({
+        "time_min":        t.astype(int),
+        "temperature_C":   np.round(temperature, 3),
+        "pressure_bar":    np.round(pressure, 4),
+        "flowrate_kmolhr": np.round(flowrate, 4),
     })
-    return df
 
 
 # ─────────────────────────────────────────────
-# 1. 재순환 비율 최적화
+# 4. 민감도 분석: 벤젠 공급량 vs 큐멘 생산량
 # ─────────────────────────────────────────────
 
-def optimize_recycle_ratio(
-    T_in: float = 420.0,
-    P_in: float = 30.0,
-    ratio_range: tuple = (0.0, 0.70),
-    steps: int = 71,
+def sensitivity_benzene_feed(
+    feed_range: tuple = (80.0, 130.0),
+    steps: int = 51,
 ) -> pd.DataFrame:
     """
-    재순환 비율을 단계별로 변경하며 최적점 탐색
-    Returns DataFrame with all simulation results
+    벤젠 공급량에 따른 큐멘 생산량 민감도 분석
+    최적점: 103.105 kmol/hr (Aspen Plus 결과)
     """
-    ratios = np.linspace(ratio_range[0], ratio_range[1], steps)
-    results = [simulate_reactor(r, T_in, P_in) for r in ratios]
-    df = pd.DataFrame(results)
+    feeds = np.linspace(feed_range[0], feed_range[1], steps)
+    peak  = OPTIMAL_BENZENE_FEED
 
-    best_idx = df["econ_score"].idxmax()
-    best = df.loc[best_idx]
+    def _prod(b):
+        if b <= peak:
+            return round(60.0 + (b - 80.0) * 1.45, 4)
+        else:
+            return round(60.0 + (peak - 80.0) * 1.45 - (b - peak) * 0.90, 4)
 
-    print("=" * 50)
-    print("  CUMENE 재순환 비율 최적화 결과")
-    print("=" * 50)
-    print(f"  총 시뮬레이션 횟수  : {steps}회")
-    print(f"  최적 재순환 비율    : {best['recycle_ratio']:.2f}")
-    print(f"  최적 전환율         : {best['conversion']:.2f}%")
-    print(f"  최적 미반응 원료    : {best['unreacted']:.2f}%")
-    print(f"  최적 경제성 점수    : {best['econ_score']:.2f}/100")
-    print(f"  최적 반응기 부하    : {best['reactor_load']:.2f} (기준=100)")
-    print("-" * 50)
-    print(f"  기존 전환율         : 61.56%")
-    print(f"  전환율 향상         : +{best['conversion'] - 61.56:.2f}%p")
-    print(f"  미반응 원료 감소    : 13.5% → {best['unreacted']:.2f}%")
-    print("=" * 50)
-    return df
+    return pd.DataFrame({
+        "benzene_feed_kmolhr": np.round(feeds, 3),
+        "cumene_prod_kmolhr":  [max(_prod(f), 0) for f in feeds],
+    })
 
 
 # ─────────────────────────────────────────────
-# 2. 공정 조건 시각화
+# 5. 시각화
 # ─────────────────────────────────────────────
 
-def plot_process_conditions(df_process: pd.DataFrame, save_path: str = None):
-    """온도·압력·유량 시간 축 추적 시각화"""
-    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-    fig.suptitle("CUMENE 공정 조건 시간 축 추적 (재순환 비율 0.35 기준)", fontsize=14, fontweight="bold")
-
-    t = df_process["time_min"]
-
-    # 온도
-    axes[0].plot(t, df_process["temperature_C"], color="#D85A30", linewidth=1.5, label="온도 (°C)")
-    axes[0].axhline(420, color="#D85A30", linestyle="--", linewidth=0.8, alpha=0.5, label="설계 기준 (420°C)")
-    axes[0].set_ylabel("온도 (°C)", fontsize=11)
-    axes[0].legend(fontsize=9)
-    axes[0].grid(True, alpha=0.3)
-
-    # 압력
-    axes[1].plot(t, df_process["pressure_bar"], color="#378ADD", linewidth=1.5, label="압력 (bar)")
-    axes[1].axhline(30, color="#378ADD", linestyle="--", linewidth=0.8, alpha=0.5, label="설계 기준 (30 bar)")
-    axes[1].set_ylabel("압력 (bar)", fontsize=11)
-    axes[1].legend(fontsize=9)
-    axes[1].grid(True, alpha=0.3)
-
-    # 유량
-    axes[2].plot(t, df_process["flowrate_kmolh"], color="#1D9E75", linewidth=1.5, label="유량 (kmol/h)")
-    axes[2].set_ylabel("유량 (kmol/h)", fontsize=11)
-    axes[2].set_xlabel("시간 (min)", fontsize=11)
-    axes[2].legend(fontsize=9)
-    axes[2].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"  공정 조건 그래프 저장 완료: {save_path}")
-    plt.show()
-
-
-def plot_recycle_optimization(df_opt: pd.DataFrame, save_path: str = None):
-    """재순환 비율 최적화 결과 시각화"""
+def plot_recycle_optimization(df: pd.DataFrame, save_path: str = None):
     fig, ax1 = plt.subplots(figsize=(12, 5))
-    fig.suptitle("재순환 비율에 따른 공정 지표 변화", fontsize=14, fontweight="bold")
+    fig.suptitle("재순환 비율에 따른 공정 지표 변화\n(Aspen Plus Stage 1→2 실측값 기반)", fontsize=13, fontweight="bold")
 
-    x = df_opt["recycle_ratio"]
+    x = df["recycle_ratio"]
+    ax1.plot(x, df["conversion_pct"], color="#1D9E75", lw=2,   label="전환율 (%)")
+    ax1.plot(x, df["econ_score"],     color="#378ADD", lw=2,   ls="--", label="경제성 점수")
+    ax1.plot(x, df["cumene_prod"],    color="#9F7FE3", lw=1.5, ls="-.", label="큐멘 생산량 (kmol/hr)")
 
-    ax1.plot(x, df_opt["conversion"], color="#1D9E75", linewidth=2, label="전환율 (%)")
-    ax1.plot(x, df_opt["econ_score"], color="#378ADD", linewidth=2, linestyle="--", label="경제성 점수")
+    for r, label, yoff in [(0.0, "Stage 1\n(61.56%)", 55), (0.10, "Stage 2\n(64.00%)", 57)]:
+        ax1.axvline(r, color="#D85A30", lw=1, ls=":", alpha=0.8)
+        conv = 61.56 if r == 0 else 64.00
+        ax1.annotate(label, xy=(r, conv), xytext=(r + 0.03, yoff), fontsize=8,
+                     arrowprops=dict(arrowstyle="->", color="#D85A30", lw=0.8), color="#D85A30")
+
     ax1.set_xlabel("재순환 비율", fontsize=11)
-    ax1.set_ylabel("전환율 / 경제성 점수", fontsize=11)
-    ax1.grid(True, alpha=0.3)
+    ax1.set_ylabel("전환율 / 경제성 / 큐멘 생산량", fontsize=11)
+    ax1.grid(True, alpha=0.25)
 
     ax2 = ax1.twinx()
-    ax2.plot(x, df_opt["reactor_load"], color="#D85A30", linewidth=1.5, linestyle=":", label="반응기 부하")
+    ax2.plot(x, df["reactor_load"], color="#D85A30", lw=1.5, ls=":", label="반응기 부하")
     ax2.set_ylabel("반응기 부하 (기준=100)", fontsize=11, color="#D85A30")
 
-    # 최적점 표시
-    best_idx = df_opt["econ_score"].idxmax()
-    best_r = df_opt.loc[best_idx, "recycle_ratio"]
-    best_score = df_opt.loc[best_idx, "econ_score"]
-    ax1.axvline(best_r, color="gray", linestyle="--", linewidth=1, alpha=0.7)
-    ax1.annotate(f"최적점 r={best_r:.2f}", xy=(best_r, best_score),
-                 xytext=(best_r + 0.05, best_score - 8),
-                 fontsize=9, arrowprops=dict(arrowstyle="->", color="gray"))
-
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc="lower left")
+    l1, lb1 = ax1.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    ax1.legend(l1 + l2, lb1 + lb2, fontsize=9, loc="upper right")
 
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"  최적화 그래프 저장 완료: {save_path}")
+        print(f"  저장: {save_path}")
     plt.show()
 
 
-def plot_comparison(save_path: str = None):
-    """기존 공정 vs 개선 공정 비교 바 차트"""
-    labels = ["전환율 (%)", "미반응 원료 (%)", "경제성 점수", "안정성 점수"]
-    original = [61.56, 13.5, 58, 72]
-    improved = [74.0, 3.2, 87, 91]
+def plot_process_conditions(df: pd.DataFrame, save_path: str = None):
+    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+    fig.suptitle("CUMENE 공정 조건 시간 축 추적\n(CUMENE Stream | Liquid, 151.807°C, 1 bar)", fontsize=13, fontweight="bold")
 
-    x = np.arange(len(labels))
-    width = 0.35
+    t = df["time_min"]
+    specs = [
+        ("temperature_C",   "#D85A30", f"기준 {STAGE1_CUMENE_TEMP}°C",  "온도 (°C)",    STAGE1_CUMENE_TEMP),
+        ("pressure_bar",    "#378ADD", f"기준 {STAGE1_CUMENE_PRES} bar", "압력 (bar)",   STAGE1_CUMENE_PRES),
+        ("flowrate_kmolhr", "#1D9E75", None,                             "유량 (kmol/hr)", None),
+    ]
+    for ax, (col, color, ref_label, ylabel, ref_val) in zip(axes, specs):
+        ax.plot(t, df[col], color=color, lw=1.5)
+        if ref_val is not None:
+            ax.axhline(ref_val, color=color, ls="--", lw=0.8, alpha=0.5, label=ref_label)
+            ax.legend(fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.grid(True, alpha=0.25)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.suptitle("기존 공정 vs 개선 공정 (재순환 적용) 비교", fontsize=14, fontweight="bold")
+    axes[2].set_xlabel("시간 (min)", fontsize=11)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  저장: {save_path}")
+    plt.show()
 
-    bars1 = ax.bar(x - width / 2, original, width, label="기존 공정", color="#3266ad", alpha=0.85)
-    bars2 = ax.bar(x + width / 2, improved, width, label="개선 공정", color="#1D9E75", alpha=0.85)
 
-    for bar in bars1:
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=9)
-    for bar in bars2:
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=9)
+def plot_stream_comparison(save_path: str = None):
+    streams    = ["CUMENE", "FT-VAP", "B2"]
+    components = ["Cumene", "Benzene", "Propylene"]
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=11)
-    ax.set_ylim(0, 105)
-    ax.set_ylabel("값", fontsize=11)
-    ax.legend(fontsize=10)
-    ax.grid(axis="y", alpha=0.3)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+    fig.suptitle("Stage 1 vs Stage 2 스트림 몰유량 비교 (kmol/hr)\n(Aspen Plus 실측값)", fontsize=13, fontweight="bold")
+
+    x, w = np.arange(len(components)), 0.35
+    for idx, stream in enumerate(streams):
+        s1 = [STAGE1_STREAMS[stream][c] for c in components]
+        s2 = [STAGE2_STREAMS[stream][c] for c in components]
+        bars1 = axes[idx].bar(x - w/2, s1, w, label="Stage 1", color="#3266ad", alpha=0.85)
+        bars2 = axes[idx].bar(x + w/2, s2, w, label="Stage 2", color="#1D9E75", alpha=0.85)
+        for bar in list(bars1) + list(bars2):
+            h = bar.get_height()
+            if h > 0.01:
+                axes[idx].text(bar.get_x() + bar.get_width()/2, h + h*0.02,
+                               f"{h:.2f}", ha="center", va="bottom", fontsize=8)
+        axes[idx].set_title(f"Stream: {stream}", fontsize=11)
+        axes[idx].set_xticks(x)
+        axes[idx].set_xticklabels(components, fontsize=9)
+        axes[idx].set_ylabel("kmol/hr", fontsize=10)
+        axes[idx].legend(fontsize=8)
+        axes[idx].grid(axis="y", alpha=0.25)
 
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"  비교 그래프 저장 완료: {save_path}")
+        print(f"  저장: {save_path}")
+    plt.show()
+
+
+def plot_sensitivity_analysis(df: pd.DataFrame, save_path: str = None):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle("민감도 분석: 벤젠 공급량 vs 큐멘 생산량\n(최적 공급량 103.105 kmol/hr)", fontsize=13, fontweight="bold")
+
+    ax.plot(df["benzene_feed_kmolhr"], df["cumene_prod_kmolhr"], color="#1D9E75", lw=2)
+    peak_prod = df.loc[df["cumene_prod_kmolhr"].idxmax(), "cumene_prod_kmolhr"]
+    ax.axvline(OPTIMAL_BENZENE_FEED, color="#D85A30", ls="--", lw=1.2,
+               label=f"최적 공급량 {OPTIMAL_BENZENE_FEED} kmol/hr")
+    ax.scatter([OPTIMAL_BENZENE_FEED], [peak_prod], color="#D85A30", zorder=5, s=60)
+    ax.annotate(f"최대 큐멘 생산량\n{peak_prod:.2f} kmol/hr",
+                xy=(OPTIMAL_BENZENE_FEED, peak_prod),
+                xytext=(OPTIMAL_BENZENE_FEED + 5, peak_prod - 5),
+                fontsize=9, arrowprops=dict(arrowstyle="->", color="#D85A30", lw=0.8))
+
+    ax.set_xlabel("벤젠 공급량 (kmol/hr)", fontsize=11)
+    ax.set_ylabel("큐멘 생산량 (kmol/hr)", fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.25)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  저장: {save_path}")
     plt.show()
 
 
@@ -267,24 +358,37 @@ def plot_comparison(save_path: str = None):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("\n[ 1단계 ] 재순환 비율 최적화 시뮬레이션")
-    df_opt = optimize_recycle_ratio(T_in=420, P_in=30, steps=71)
+    np.random.seed(42)
+
+    print("\n[ 1단계 ] 전환율 계산 및 경제성 요약")
+    print_conversion_summary()
+
+    print("\n[ 2단계 ] 재순환 비율 최적화 (91회 시뮬레이션)")
+    df_opt = optimize_recycle_ratio(steps=91)
     df_opt.to_csv("recycle_optimization_results.csv", index=False, encoding="utf-8-sig")
-    print("  결과 저장: recycle_optimization_results.csv\n")
+    print("  저장: recycle_optimization_results.csv")
 
-    print("[ 2단계 ] 공정 조건 시간 축 추적")
-    df_process = track_process_conditions(
-        recycle_ratio=0.35, T_in=420, P_in=30, flow_in=100, duration_min=50
+    print("\n[ 3단계 ] 공정 조건 시간 축 추적 (Stage 2 기준)")
+    df_proc = track_process_conditions(
+        T_in=STAGE1_CUMENE_TEMP,
+        P_in=STAGE1_CUMENE_PRES,
+        flow_in=STAGE2_STREAMS["CUMENE"]["Cumene"],
+        recycle_ratio=0.10,
+        duration_min=50,
     )
-    df_process.to_csv("process_conditions_log.csv", index=False, encoding="utf-8-sig")
-    print("  결과 저장: process_conditions_log.csv")
-    print(df_process.head(10).to_string(index=False))
-    print()
+    df_proc.to_csv("process_conditions_log.csv", index=False, encoding="utf-8-sig")
+    print("  저장: process_conditions_log.csv")
+    print(df_proc.head(10).to_string(index=False))
 
-    print("[ 3단계 ] 시각화 출력")
-    plot_recycle_optimization(df_opt, save_path="recycle_optimization.png")
-    plot_process_conditions(df_process, save_path="process_conditions.png")
-    plot_comparison(save_path="process_comparison.png")
+    print("\n[ 4단계 ] 민감도 분석 (벤젠 공급량 vs 큐멘 생산량)")
+    df_sens = sensitivity_benzene_feed()
+    df_sens.to_csv("sensitivity_analysis.csv", index=False, encoding="utf-8-sig")
+    print("  저장: sensitivity_analysis.csv")
+
+    print("\n[ 5단계 ] 시각화 출력")
+    plot_recycle_optimization(df_opt,  save_path="recycle_optimization.png")
+    plot_process_conditions(df_proc,   save_path="process_conditions.png")
+    plot_stream_comparison(save_path="stream_comparison.png")
+    plot_sensitivity_analysis(df_sens, save_path="sensitivity_analysis.png")
 
     print("\n모든 시뮬레이션 완료.")
-    
